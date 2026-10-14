@@ -8,6 +8,21 @@ API_KEY = os.getenv("OPENROUTER_API_KEY")
 BASE_URL = os.getenv("OPENROUTER_BASE_URL", default="https://openrouter.ai/api/v1")
 
 
+def read_tool(file_path: str) -> str:
+    with open(file_path, 'r') as f:
+        content = f.read()
+    
+    print(content)
+
+def get_tool_response(tool: dict):
+
+    function_name = tool.name
+    params = tool.arguments 
+
+    print(function_name, params)
+
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("-p", required=True)
@@ -49,7 +64,13 @@ def main():
     print("Logs from your program will appear here!", file=sys.stderr)
 
     # TODO: Uncomment the following line to pass the first stage
-    print(chat.choices[0].message.content)
+    # print(chat.choices[0].message.content)
+
+    choices_content = chat.choices[0].message.content
+
+    response = get_tool_response(choices_content.message.tool_calls.function)
+
+    print("response")
 
 
 if __name__ == "__main__":
