@@ -12,18 +12,22 @@ def read_tool(file_path: str) -> str:
     with open(file_path, 'r') as f:
         content = f.read()
     
-    print(content)
+    return content
+    # print(content)
 
 def get_tool_response(tool: dict):
 
     function_name = tool.name
-    params = tool.arguments 
-    print(function_name, params)
+    params = eval(tool.arguments) 
+    # print(function_name, params)
+    tool_response = None
 
     if function_name == "Read":
-        tool_response = read_tool(params)
+        tool_response = read_tool(**params)
+    
+    return tool_response
 
-    print(tool_response)
+    # print(tool_response)
 
 
 
@@ -68,13 +72,13 @@ def main():
     print("Logs from your program will appear here!", file=sys.stderr)
 
     # TODO: Uncomment the following line to pass the first stage
-    print(chat.choices[0].message)
+    # print(chat.choices[0].message)
 
     choices_content = chat.choices[0].message
 
     response = get_tool_response(choices_content.tool_calls[0].function)
 
-    print("response")
+    print(response)
 
 
 if __name__ == "__main__":
