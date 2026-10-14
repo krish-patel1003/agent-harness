@@ -18,6 +18,7 @@ def get_tool_response(tool: dict):
 
     function_name = tool.name
     params = tool.arguments 
+    print(function_name, params)
 
     if function_name == "Read":
         tool_response = read_tool(params)
