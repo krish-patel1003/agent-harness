@@ -72,13 +72,15 @@ def main():
     print("Logs from your program will appear here!", file=sys.stderr)
 
     # TODO: Uncomment the following line to pass the first stage
-    # print(chat.choices[0].message)
+    if chat.choices[0].message.content:
+        print(chat.choices[0].message.content)
+    
+    else:
+        choices_content = chat.choices[0].message
 
-    choices_content = chat.choices[0].message
+        response = get_tool_response(choices_content.tool_calls[0].function)
 
-    response = get_tool_response(choices_content.tool_calls[0].function)
-
-    print(response)
+        print(response)
 
 
 if __name__ == "__main__":
