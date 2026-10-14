@@ -64,11 +64,11 @@ def main():
     print("Logs from your program will appear here!", file=sys.stderr)
 
     # TODO: Uncomment the following line to pass the first stage
-    print(chat.choices[0].message.tool_calls[0].function)
+    print(chat.choices[0].message)
 
-    choices_content = chat.choices[0].message.content
+    choices_content = chat.choices[0].message
 
-    response = get_tool_response(choices_content.message.tool_calls.function)
+    response = get_tool_response(choices_content.tool_calls[0].function)
 
     print("response")
 
