@@ -61,6 +61,16 @@ def write_file(args: dict[str, Any]) -> str:
     return f"Content written to {file_path}"
 
 
+def execute_bash(args: dict[str, Any]) -> str:
+    command = args.get("command")
+    # return the stdout or the stderr of the command
+    if not command:
+        raise ValueError("Missing 'command' argument.")
+    import subprocess
+    result = subprocess.run(command, shell=True, capture_output=True, text=True)
+    return result.stdout or result.stderr
+
+
 class Agent:
 
     def __init__(
@@ -156,6 +166,21 @@ def main():
         function=write_file
     )
 
+    tools.register_tool(
+        name="Bash",
+        description="Execute a bash command and return the output",
+        parameters={
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": "The bash command to execute"
+                }
+            },
+            "required": ["command"]
+        },
+        function=execute_bash
+    )
     agent = Agent(client=client, tools=tools, model="anthropic/claude-haiku-4.5")
 
     print("Logs from your program will appear here!", file=sys.stderr)
