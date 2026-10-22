@@ -5,6 +5,7 @@ import json
 from collections.abc import Callable
 from typing import Any
 from pathlib import Path
+from html import escape
 import re
 
 from openai import OpenAI
@@ -56,6 +57,80 @@ class Skills:
         for skill in skills:
             prompt += f"- {skill['name']}: {skill['description']} (path: {skill['path']})\n"
         return prompt
+
+    @staticmethod
+    def expand_slash_command(prompt: str, skills: list[dict[str, Any]]) -> str:
+        if not prompt.lstrip().startswith("/"):
+            return prompt
+
+        parts = prompt.lstrip().split(maxsplit=1)
+        command = parts[0][1:]
+        arguments = parts[1] if len(parts) > 1 else ""
+
+        matches = [
+            skill for skill in skills
+            if command in (skill["name"], Path(skill["path"]).parent.name)
+        ]
+        if not matches:
+            raise ValueError(f"Unknown skill command: /{command}")
+        if len(matches) > 1:
+            raise ValueError(f"Ambiguous skill command: /{command}")
+
+        skill = matches[0]
+        path = Path(skill["path"])
+        content = path.read_text(encoding="utf-8")
+        match = re.match(r"\A---[ \t]*\n(.*?)\n---[ \t]*(?:\n|\Z)", content, re.DOTALL)
+        if not match:
+            raise ValueError(f"Skill file {path} is missing frontmatter")
+
+        instructions = content[match.end():]
+        if "$ARGUMENTS" in instructions:
+            instructions = instructions.replace("$ARGUMENTS", arguments)
+        elif arguments:
+            instructions += f"\n\nArguments: {arguments}"
+
+        return (
+            f"Run the /{command} skill using these instructions.\n"
+            f"Resolve relative file references from: {path.parent}\n\n"
+            f"{instructions}"
+        )
+
+    @staticmethod
+    def expand_skill_stack(prompt: str, skills: list[dict[str, Any]]) -> str:
+        available_skills = {
+            name: skill for skill in skills
+            for name in (skill["name"], Path(skill["path"]).parent.name)
+        }
+
+        remaining = prompt.lstrip()
+        commands = []
+        while remaining.startswith("/"):
+            parts = remaining.split(maxsplit=1)
+            token = parts[0]
+            skill = available_skills.get(token[1:])
+
+            if skill is None:
+                break
+
+            commands.append((token, skill))
+            remaining = parts[1] if len(parts) > 1 else ""
+
+        if not commands:
+            return prompt
+
+        instructions = [
+            f'<skill name="{escape(skill["name"], quote=True)}">\n'
+            + Skills.expand_slash_command(f"{command} {remaining}", skills)
+            + "\n</skill>"
+            for command, skill in commands
+        ]
+
+        return (
+            "Apply all the following skills in the listed order. "
+            "Combine their findings into one response.\n\n"
+            + "\n\n".join(instructions)
+        )
+
 
 class ToolRegistry:
 
@@ -138,6 +213,7 @@ class Agent:
     def run(self, prompt: str) -> str:
 
         skills = Skills.load_skills_catalog()
+        prompt = Skills.expand_skill_stack(prompt, skills)
 
         messages = [
             {"role": "system", "content": Skills.skills_prompt(skills)},
