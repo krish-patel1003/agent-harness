@@ -34,7 +34,7 @@ class Skills:
 
             frontmatter = match.group(1)
             fields = dict(
-                re.findall(r"^(name|description):[ \t]*(.+?)[ \t]*$", frontmatter, re.MULTILINE)
+                re.findall(r"^(name|description|context):[ \t]*(.+?)[ \t]*$", frontmatter, re.MULTILINE)
             )
 
             if "name" not in fields or "description" not in fields:
@@ -43,6 +43,7 @@ class Skills:
             skills.append({
                 "name": fields["name"].strip("\"'"),
                 "description": fields["description"].strip("\"'"),
+                "context": fields.get("context", "").strip("\"'"),
                 "path": str(path)
             })
 
@@ -52,11 +53,34 @@ class Skills:
     def skills_prompt(skills: list[dict[str, Any]]) -> str:
         prompt = (
             "You have access to the following skills. When a skill matches the task, "
-            "use the Read tool to read its SKILL.md and follow its instructions.\n\n"
+            "call the Skill tool with its name and arguments, then follow the returned "
+            "instructions using the available tools. You can load multiple skills. "
+            "For context: fork skills, the tool runs a subagent and returns its completed "
+            "result; use that result without repeating the subagent's work. "
+            "Skills already expanded in the conversation do not need to be loaded again.\n\n"
         )
         for skill in skills:
             prompt += f"- {skill['name']}: {skill['description']} (path: {skill['path']})\n"
         return prompt
+
+    @staticmethod
+    def invoke(
+        args: dict[str, Any],
+        skills: list[dict[str, Any]],
+        execute: Callable[[dict[str, Any], str], str],
+    ) -> str:
+        name = args.get("skill")
+        arguments = args.get("args", "")
+        if not isinstance(name, str) or not name or any(char.isspace() for char in name):
+            return "Error: 'skill' must be a single nonempty skill name."
+        if not isinstance(arguments, str):
+            return "Error: 'args' must be a string."
+
+        command = name if name.startswith("/") else f"/{name}"
+        try:
+            return execute(Skills.find(command[1:], skills), arguments)
+        except (ValueError, OSError, RuntimeError) as error:
+            return f"Error loading skill: {error}"
 
     @staticmethod
     def expand_slash_command(prompt: str, skills: list[dict[str, Any]]) -> str:
@@ -67,6 +91,16 @@ class Skills:
         command = parts[0][1:]
         arguments = parts[1] if len(parts) > 1 else ""
 
+        skill = Skills.find(command, skills)
+        instructions = Skills.render(skill, arguments)
+        return (
+            f"Run the /{command} skill using these instructions.\n"
+            f"Resolve relative file references from: {Path(skill['path']).parent}\n\n"
+            f"{instructions}"
+        )
+
+    @staticmethod
+    def find(command: str, skills: list[dict[str, Any]]) -> dict[str, Any]:
         matches = [
             skill for skill in skills
             if command in (skill["name"], Path(skill["path"]).parent.name)
@@ -76,7 +110,10 @@ class Skills:
         if len(matches) > 1:
             raise ValueError(f"Ambiguous skill command: /{command}")
 
-        skill = matches[0]
+        return matches[0]
+
+    @staticmethod
+    def render(skill: dict[str, Any], arguments: str) -> str:
         path = Path(skill["path"])
         content = path.read_text(encoding="utf-8")
         match = re.match(r"\A---[ \t]*\n(.*?)\n---[ \t]*(?:\n|\Z)", content, re.DOTALL)
@@ -89,14 +126,14 @@ class Skills:
         elif arguments:
             instructions += f"\n\nArguments: {arguments}"
 
-        return (
-            f"Run the /{command} skill using these instructions.\n"
-            f"Resolve relative file references from: {path.parent}\n\n"
-            f"{instructions}"
-        )
+        return instructions
 
     @staticmethod
-    def expand_skill_stack(prompt: str, skills: list[dict[str, Any]]) -> str:
+    def expand_skill_stack(
+        prompt: str,
+        skills: list[dict[str, Any]],
+        execute: Callable[[dict[str, Any], str], str],
+    ) -> str:
         available_skills = {
             name: skill for skill in skills
             for name in (skill["name"], Path(skill["path"]).parent.name)
@@ -120,13 +157,13 @@ class Skills:
 
         instructions = [
             f'<skill name="{escape(skill["name"], quote=True)}">\n'
-            + Skills.expand_slash_command(f"{command} {remaining}", skills)
+            + execute(Skills.find(command[1:], skills), remaining)
             + "\n</skill>"
             for command, skill in commands
         ]
 
         return (
-            "Apply all the following skills in the listed order. "
+            "Apply the following skill instructions and use any completed subagent results. "
             "Combine their findings into one response.\n\n"
             + "\n\n".join(instructions)
         )
@@ -157,6 +194,12 @@ class ToolRegistry:
 
     def definition(self) -> list[dict[str, Any]]:
         return list(self._tools.values())
+
+    def clone(self) -> "ToolRegistry":
+        registry = ToolRegistry()
+        registry._tools = self._tools.copy()
+        registry._functions = self._functions.copy()
+        return registry
 
     def get_function(self, name: str) -> Callable[[dict[str, Any]], str] | None:
         return self._functions.get(name, None)
@@ -204,19 +247,82 @@ class Agent:
             tools: ToolRegistry,
             model: str,
             max_turns: int = 20,
+            depth: int = 0,
+            max_depth: int = 3,
             ) -> None:
         self.client = client
-        self.tools = tools
+        self.tools = tools.clone()
         self.model = model
         self.max_turns = max_turns
+        self.depth = depth
+        self.max_depth = max_depth
 
     def run(self, prompt: str) -> str:
 
         skills = Skills.load_skills_catalog()
-        prompt = Skills.expand_skill_stack(prompt, skills)
+        prompt = Skills.expand_skill_stack(
+            prompt, skills, lambda skill, arguments: self.execute_skill(skill, arguments, skills)
+        )
+        return self.run_loop(prompt, skills)
+
+    def execute_skill(
+        self, skill: dict[str, Any], arguments: str, skills: list[dict[str, Any]]
+    ) -> str:
+        instructions = Skills.render(skill, arguments)
+        base_directory = Path(skill["path"]).parent
+        if skill.get("context") == "fork":
+            if self.depth >= self.max_depth:
+                raise RuntimeError(f"Maximum subagent depth ({self.max_depth}) reached")
+            child = Agent(
+                client=self.client,
+                tools=self.tools,
+                model=self.model,
+                max_turns=self.max_turns,
+                depth=self.depth + 1,
+                max_depth=self.max_depth,
+            )
+            result = child.run_loop(
+                instructions,
+                skills,
+                system_context=(
+                    "You are a subagent. Complete the assigned skill task and return a final answer. "
+                    f"Resolve relative skill file references from: {base_directory}"
+                ),
+            )
+            return f"Completed subagent result for {skill['name']}:\n{result}"
+
+        return (
+            f"Follow the {skill['name']} skill instructions.\n"
+            f"Resolve relative skill file references from: {base_directory}\n\n"
+            f"{instructions}"
+        )
+
+    def run_loop(
+        self, prompt: str, skills: list[dict[str, Any]], system_context: str = ""
+    ) -> str:
+        self.tools.register_tool(
+            name="Skill",
+            description=(
+                "Load a skill's instructions with optional arguments. "
+                "Choose a skill from the catalog. Regular skills return instructions; "
+                "context: fork skills run a subagent and return its final result."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "skill": {"type": "string", "description": "The skill name from the catalog"},
+                    "args": {"type": "string", "description": "Arguments to substitute into the skill"},
+                },
+                "required": ["skill"],
+            },
+            function=lambda arguments: Skills.invoke(
+                arguments, skills,
+                lambda skill, args: self.execute_skill(skill, args, skills),
+            ),
+        )
 
         messages = [
-            {"role": "system", "content": Skills.skills_prompt(skills)},
+            {"role": "system", "content": Skills.skills_prompt(skills) + "\n" + system_context},
             {"role": "user", "content": prompt}]
         for turn in range(self.max_turns):
             response = self.client.chat.completions.create(
