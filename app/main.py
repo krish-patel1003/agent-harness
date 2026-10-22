@@ -4,8 +4,58 @@ import sys
 import json
 from collections.abc import Callable
 from typing import Any
+from pathlib import Path
+import re
 
 from openai import OpenAI
+
+class Skills:
+    """
+    Class to manage and skills 
+    """
+
+    
+
+    def __init__(self):
+        self.skills: dict[str, dict[str, Any]] = {}
+
+    @staticmethod
+    def load_skills_catalog():
+        skills = []
+        skills_dir = Path.cwd() / ".claude" / "skills"
+
+        for path in sorted(skills_dir.glob("*/SKILL.md")):
+            content = path.read_text(encoding="utf-8")
+            match = re.match(r"\A---[ \t]*\n(.*?)\n---[ \t]*(?:\n|\Z)", content, re.DOTALL)
+
+            if not match:
+                raise ValueError(f"Skill file {path} is missing frontmatter")
+
+            frontmatter = match.group(1)
+            fields = dict(
+                re.findall(r"^(name|description):[ \t]*(.+?)[ \t]*$", frontmatter, re.MULTILINE)
+            )
+
+            if "name" not in fields or "description" not in fields:
+                raise ValueError(f"Skill file {path} is missing name or description")
+
+            skills.append({
+                "name": fields["name"].strip("\"'"),
+                "description": fields["description"].strip("\"'"),
+                "path": str(path)
+            })
+
+        return skills
+
+    @staticmethod
+    def skills_prompt(skills: list[dict[str, Any]]) -> str:
+        prompt = (
+            "You have access to the following skills. When a skill matches the task, "
+            "use the Read tool to read its SKILL.md and follow its instructions.\n\n"
+        )
+        for skill in skills:
+            prompt += f"- {skill['name']}: {skill['description']} (path: {skill['path']})\n"
+        return prompt
 
 class ToolRegistry:
 
@@ -86,7 +136,12 @@ class Agent:
         self.max_turns = max_turns
 
     def run(self, prompt: str) -> str:
-        messages = [{"role": "user", "content": prompt}]
+
+        skills = Skills.load_skills_catalog()
+
+        messages = [
+            {"role": "system", "content": Skills.skills_prompt(skills)},
+            {"role": "user", "content": prompt}]
         for turn in range(self.max_turns):
             response = self.client.chat.completions.create(
                 model=self.model,
